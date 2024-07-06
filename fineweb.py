@@ -11,6 +11,7 @@ import os
 import multiprocessing as mp
 import numpy as np
 import tiktoken
+import datasets
 from datasets import load_dataset # pip install datasets
 from tqdm import tqdm # pip install tqdm
 
@@ -23,8 +24,14 @@ shard_size = int(1e8) # 100M tokens per shard, total of 100 shards
 DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
 os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
+# hf_home 在终端再设置一次更保险
+os.environ['HF_HOME'] = '/root/autodl-tmp/cache/'
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+config = datasets.DownloadConfig(resume_download=True, max_retries=100)
+cache_dir = 'cache'
 # download the dataset
-fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train")
+fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train", cache_dir=cache_dir, download_config=config)
 
 # init the tokenizer
 enc = tiktoken.get_encoding("gpt2")

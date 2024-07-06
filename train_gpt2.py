@@ -211,7 +211,47 @@ def load_tokens(filename):
     ptt = torch.tensor(npt, dtype=torch.long)
     return ptt
 
+
 class DataLoaderLite:
+    def __init__(self, B, T, process_rank, num_processes, split) -> None:
+        super().__init__()
+        self.B = B
+        self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        assert split in {'train', 'val'}
+
+        with open('input.txt', 'r') as f:
+            text = f.read()
+
+        enc = tiktoken.get_encoding('gpt2')
+        tokens = enc.encode(text=text)
+        self.tokens = torch.tensor(tokens)
+        print(f'loaded {len(self.tokens)} tokens')
+        print(f'epoch = {len(self.tokens)//(B*T)} batches')
+        #self.current_position = self.B * self.T * self.process_rank
+        self.reset()
+
+    def reset(self):
+        # state, init at shard zero
+        self.current_shard = 0
+        #self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T * self.process_rank
+
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        x = (buf[:-1]).view(B, T) # inputs
+        y = (buf[1:]).view(B, T) # targets
+        # advance the position in the tensor
+        self.current_position += B * T * self.num_processes
+        # if loading the next batch would be out of bounds, advance to next shard
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_position = B * T * self.process_rank
+        return x, y
+
+
+class DataLoaderLite2:
     def __init__(self, B, T, process_rank, num_processes, split):
         self.B = B
         self.T = T
@@ -287,6 +327,7 @@ import torch.distributed as dist
 
 # set up DDP (distributed data parallel).
 # torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
+# torchrun --standalone --nproc-per-node=gpu train_gpt2.py
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
 if ddp:
     # use of DDP atm demands CUDA, we set the device appropriately according to rank
@@ -322,6 +363,7 @@ if torch.cuda.is_available():
 enc = tiktoken.get_encoding("gpt2")
 
 total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens
+# 如果GPU显存不足，建议调低B值和T值
 B = 64 # micro batch size
 T = 1024 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
@@ -367,7 +409,7 @@ def get_lr(it):
 optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
 
 # create the log directory we will write checkpoints to and log to
-log_dir = "log"
+log_dir = "log124M_10B"
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"log.txt")
 with open(log_file, "w") as f: # open for writing to clear the file
@@ -516,6 +558,9 @@ for step in range(max_steps):
         print(f"step {step:5d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
         with open(log_file, "a") as f:
             f.write(f"{step} train {loss_accum.item():.6f}\n")
+
+model_id_or_path = 'nanogpt3-124M.pth'
+torch.save(model, model_id_or_path)
 
 if ddp:
     destroy_process_group()
